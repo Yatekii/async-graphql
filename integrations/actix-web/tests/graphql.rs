@@ -1,19 +1,29 @@
 mod test_utils;
-use actix_web::{guard, test, web, App};
+use actix_http::{body::MessageBody, Method};
+use actix_web::{
+    dev::{AppConfig, Service, ServiceResponse},
+    guard, test, web, App,
+};
 use async_graphql::*;
 use serde_json::json;
 use test_utils::*;
 
 #[actix_rt::test]
 async fn test_playground() {
-    let srv = test::start(|| {
+    let srv = test::init_service(
         App::new().service(
             web::resource("/")
                 .guard(guard::Get())
                 .to(test_utils::gql_playgound),
-        )
-    });
-    let mut response = srv.get("/").send().await.unwrap();
+        ),
+    )
+    .await;
+
+    let req = test::TestRequest::with_uri("/")
+        .method(Method::GET)
+        .to_request();
+
+    let mut response = srv.call(req).await.unwrap();
     assert!(response.status().is_success());
     let body = response.body().await.unwrap();
     assert!(std::str::from_utf8(&body).unwrap().contains("graphql"));
@@ -21,20 +31,23 @@ async fn test_playground() {
 
 #[actix_rt::test]
 async fn test_add() {
-    let srv = test::start(|| {
+    let srv = test::init_service(
         App::new()
             .data(Schema::new(AddQueryRoot, EmptyMutation, EmptySubscription))
             .service(
                 web::resource("/")
                     .guard(guard::Post())
                     .to(gql_handle_schema::<AddQueryRoot, EmptyMutation, EmptySubscription>),
-            )
-    });
-    let mut response = srv
-        .post("/")
-        .send_body(r#"{"query":"{ add(a: 10, b: 20) }"}"#)
-        .await
-        .unwrap();
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::with_uri("/")
+        .method(Method::POST)
+        .set_payload(r#"{"query":"{ add(a: 10, b: 20) }"}"#)
+        .to_request();
+
+    let mut response = srv.call(req).await.unwrap();
     assert!(response.status().is_success());
     let body = response.body().await.unwrap();
     assert_eq!(body, json!({"data": {"add": 30}}).to_string());
@@ -42,7 +55,7 @@ async fn test_add() {
 
 #[actix_rt::test]
 async fn test_hello() {
-    let srv = test::start(|| {
+    let srv = test::init_service(
         App::new()
             .data(Schema::new(
                 HelloQueryRoot,
@@ -53,16 +66,17 @@ async fn test_hello() {
                 web::resource("/")
                     .guard(guard::Post())
                     .to(gql_handle_schema::<HelloQueryRoot, EmptyMutation, EmptySubscription>),
-            )
-    });
+            ),
+    )
+    .await;
 
-    let mut response = srv
-        .post("/")
-        .send_body(r#"{"query":"{ hello }"}"#)
-        .await
-        .unwrap();
+    let req = test::TestRequest::with_uri("/")
+        .method(Method::POST)
+        .set_payload(r#"{"query":"{ hello }"}"#)
+        .to_request();
+    let mut response = srv.call(req).await.unwrap();
     assert!(response.status().is_success());
-    let body = response.body().await.unwrap();
+    let body = response.into_body();
     assert_eq!(
         body,
         json!({"data": {"hello": "Hello, world!"}}).to_string()
@@ -71,7 +85,7 @@ async fn test_hello() {
 
 #[actix_rt::test]
 async fn test_hello_header() {
-    let srv = test::start(|| {
+    let srv = test::init_service(
         App::new()
             .data(Schema::new(
                 HelloQueryRoot,
@@ -82,23 +96,25 @@ async fn test_hello_header() {
                 web::resource("/")
                     .guard(guard::Post())
                     .to(gql_handle_schema_with_header::<HelloQueryRoot>),
-            )
-    });
+            ),
+    )
+    .await;
 
-    let mut response = srv
-        .post("/")
-        .header("Name", "Foo")
-        .send_body(r#"{"query":"{ hello }"}"#)
-        .await
-        .unwrap();
+    let req = test::TestRequest::with_uri("/")
+        .method(Method::POST)
+        .append_header(("Name", "Foo"))
+        .set_payload(r#"{"query":"{ hello }"}"#)
+        .to_request();
+
+    let mut response = srv.call(req).await.unwrap();
     assert!(response.status().is_success());
-    let body = response.body().await.unwrap();
+    let body = response.into_body();
     assert_eq!(body, json!({"data": {"hello": "Hello, Foo!"}}).to_string());
 }
 
 #[actix_rt::test]
 async fn test_count() {
-    let srv = test::start(|| {
+    let srv = test::init_service(
         App::new()
             .data(
                 Schema::build(CountQueryRoot, CountMutation, EmptySubscription)
@@ -109,8 +125,9 @@ async fn test_count() {
                 web::resource("/")
                     .guard(guard::Post())
                     .to(gql_handle_schema::<CountQueryRoot, CountMutation, EmptySubscription>),
-            )
-    });
+            ),
+    )
+    .await;
     count_action_helper(0, r#"{"query":"{ count }"}"#, &srv).await;
     count_action_helper(10, r#"{"query":"mutation{ addCount(count: 10) }"}"#, &srv).await;
     count_action_helper(
@@ -127,10 +144,21 @@ async fn test_count() {
     .await;
 }
 
-async fn count_action_helper(expected: i32, body: &'static str, srv: &test::TestServer) {
-    let mut response = srv.post("/").send_body(body).await.unwrap();
+async fn count_action_helper<B, E>(
+    expected: i32,
+    body: &'static str,
+    srv: &impl Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+) where
+    B: std::fmt::Debug,
+    E: std::fmt::Debug,
+{
+    let req = test::TestRequest::with_uri("/")
+        .method(Method::POST)
+        .set_payload(body)
+        .to_request();
+    let mut response = srv.call(req).await.unwrap();
     assert!(response.status().is_success());
-    let body = response.body().await.unwrap();
+    let body = response.into_body();
     assert!(std::str::from_utf8(&body)
         .unwrap()
         .contains(&expected.to_string()));
